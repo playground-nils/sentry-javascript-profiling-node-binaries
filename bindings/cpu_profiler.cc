@@ -829,8 +829,7 @@ TranslateMeasurements(napi_env env, const enum ProfileFormat format,
   return measurement;
 }
 
-static napi_value TranslateProfile(napi_env env,
-                                   const v8::CpuProfile *profile,
+static napi_value TranslateProfile(napi_env env, const v8::CpuProfile *profile,
                                    const enum ProfileFormat format,
                                    const uint64_t profile_start_timestamp_ms,
                                    const uint32_t thread_id,
