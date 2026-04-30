@@ -189,8 +189,8 @@ void MeasurementsTicker::cpu_callback() {
     idle_total += core->cpu_times.idle;
   }
 
-  double idle_avg = idle_total / count;
-  double total_avg = total / count;
+  double idle_avg = static_cast<double>(idle_total) / count;
+  double total_avg = static_cast<double>(total) / count;
   double rate = 1.0 - idle_avg / total_avg;
 
   if (rate < 0.0 || isinf(rate) || isnan(rate)) {
@@ -344,6 +344,10 @@ void SentryProfile::Start(Profiler *profiler) {
 }
 
 v8::CpuProfile *SentryProfile::Stop(Profiler *profiler) {
+  if (status != ProfileStatus::kStarted) {
+    return nullptr;
+  }
+
   // Stop the CPU Profiler
   v8::CpuProfile *profile = profiler->cpu_profiler->StopProfiling(
       v8::String::NewFromUtf8(v8::Isolate::GetCurrent(), id.c_str(),
@@ -464,9 +468,9 @@ static napi_value GetFrameModuleWrapped(napi_env env, napi_callback_info info) {
   size_t len;
   assert(napi_get_value_string_utf8(env, argv[0], NULL, 0, &len) == napi_ok);
 
-  char *abs_path = (char *)malloc(len + 1);
-  assert(napi_get_value_string_utf8(env, argv[0], abs_path, len + 1, &len) ==
-         napi_ok);
+  std::string abs_path(len, '\0');
+  assert(napi_get_value_string_utf8(env, argv[0], &abs_path[0], len + 1,
+                                    &len) == napi_ok);
 
   std::string module;
   napi_value napi_module;
@@ -903,8 +907,8 @@ static napi_value StartProfiling(napi_env env, napi_callback_info info) {
   size_t len;
   assert(napi_get_value_string_utf8(env, argv[0], NULL, 0, &len) == napi_ok);
 
-  char *title = (char *)malloc(len + 1);
-  assert(napi_get_value_string_utf8(env, argv[0], title, len + 1, &len) ==
+  std::string title(len, '\0');
+  assert(napi_get_value_string_utf8(env, argv[0], &title[0], len + 1, &len) ==
          napi_ok);
 
   if (len < 1) {
@@ -934,18 +938,17 @@ static napi_value StartProfiling(napi_env env, napi_callback_info info) {
     return napi_null;
   }
 
-  const std::string profile_id(title);
   // In case we have a collision, cleanup the old profile first
-  auto existing_profile = profiler->active_profiles.find(profile_id);
+  auto existing_profile = profiler->active_profiles.find(title);
   if (existing_profile != profiler->active_profiles.end()) {
     existing_profile->second->Stop(profiler);
-    CleanupSentryProfile(profiler, existing_profile->second, profile_id);
+    CleanupSentryProfile(profiler, existing_profile->second, title);
   }
 
-  SentryProfile *sentry_profile = new SentryProfile(title);
+  SentryProfile *sentry_profile = new SentryProfile(title.c_str());
   sentry_profile->Start(profiler);
 
-  profiler->active_profiles.emplace(profile_id, sentry_profile);
+  profiler->active_profiles.emplace(title, sentry_profile);
 
   napi_value napi_null;
   assert(napi_get_null(env, &napi_null) == napi_ok);
@@ -988,8 +991,8 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
   size_t len;
   assert(napi_get_value_string_utf8(env, argv[0], NULL, 0, &len) == napi_ok);
 
-  char *title = (char *)malloc(len + 1);
-  assert(napi_get_value_string_utf8(env, argv[0], title, len + 1, &len) ==
+  std::string title(len, '\0');
+  assert(napi_get_value_string_utf8(env, argv[0], &title[0], len + 1, &len) ==
          napi_ok);
 
   if (len < 1) {
@@ -1017,7 +1020,7 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
     return napi_null;
   }
 
-  // Verify the second argument is a number
+  // Verify the third argument is a number
   napi_valuetype callbacktype2;
   assert(napi_typeof(env, argv[2], &callbacktype2) == napi_ok);
 
@@ -1031,11 +1034,9 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
     return napi_null;
   }
 
-  // Get the value of the second argument and convert it to uint8
   int32_t format;
   assert(napi_get_value_int32(env, argv[1], &format) == napi_ok);
 
-  // Get the value of the second argument and convert it to uint64
   int64_t thread_id;
   assert(napi_get_value_int64(env, argv[2], &thread_id) == napi_ok);
 
@@ -1052,8 +1053,7 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
     return napi_null;
   }
 
-  const std::string profile_id(title);
-  auto profile = profiler->active_profiles.find(profile_id);
+  auto profile = profiler->active_profiles.find(title);
 
   // If the profile was never started, silently ignore the call and return null
   if (profile == profiler->active_profiles.end()) {
@@ -1067,7 +1067,7 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
   // If for some reason stopProfiling was called with an invalid profile title
   // or if that title had somehow been stopped already, profile will be null.
   if (!cpu_profile) {
-    CleanupSentryProfile(profiler, profile->second, profile_id);
+    CleanupSentryProfile(profiler, profile->second, title);
 
     napi_value napi_null;
     assert(napi_get_null(env, &napi_null) == napi_ok);
@@ -1131,7 +1131,7 @@ static napi_value StopProfiling(napi_env env, napi_callback_info info) {
 
   napi_set_named_property(env, js_profile, "measurements", measurements);
 
-  CleanupSentryProfile(profiler, profile->second, profile_id);
+  CleanupSentryProfile(profiler, profile->second, title);
   cpu_profile->Delete();
 
   return js_profile;
@@ -1144,11 +1144,13 @@ void FreeAddonData(napi_env env, void *data, void *hint) {
     return;
   }
 
-  if (!profiler->active_profiles.empty()) {
-    for (auto &profile : profiler->active_profiles) {
-      CleanupSentryProfile(profiler, profile.second, profile.first);
+  for (auto &profile : profiler->active_profiles) {
+    if (profile.second != nullptr) {
+      profile.second->Stop(profiler);
+      delete profile.second;
     }
   }
+  profiler->active_profiles.clear();
 
   if (profiler->cpu_profiler != nullptr) {
     profiler->cpu_profiler->Dispose();
