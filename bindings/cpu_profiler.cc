@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 static const uint8_t kMaxStackDepth(128);
+static const uint16_t kMaxMeasurementSamples(300);
 static const float kSamplingFrequency(99.0); // 99 to avoid lockstep sampling
 static const float kSamplingHz(1 / kSamplingFrequency);
 static const int kSamplingInterval(kSamplingHz * 1e6);
@@ -82,7 +83,6 @@ private:
       cpu_listeners;
   v8::Isolate *isolate;
   v8::HeapStatistics heap_stats;
-  uv_cpu_info_t cpu_stats;
 
 public:
   MeasurementsTicker(uv_loop_t *loop)
@@ -161,7 +161,7 @@ void MeasurementsTicker::remove_heap_listener(
 
 // CPU tickers
 void MeasurementsTicker::cpu_callback() {
-  uv_cpu_info_t *cpu = &cpu_stats;
+  uv_cpu_info_t *cpu = nullptr;
   int count;
   int err = uv_cpu_info(&cpu, &count);
 
@@ -245,7 +245,7 @@ public:
   MeasurementsTicker measurements_ticker;
   v8::CpuProfiler *cpu_profiler;
 
-  explicit Profiler(const napi_env &env, v8::Isolate *isolate)
+  explicit Profiler(napi_env env, v8::Isolate *isolate)
       : measurements_ticker(uv_default_loop()),
         cpu_profiler(
             v8::CpuProfiler::New(isolate, kNamingMode, GetLoggingMode())) {}
@@ -274,15 +274,12 @@ public:
   explicit SentryProfile(const char *id)
       : started_at(uv_hrtime()), timestamp(timestamp_milliseconds()),
         memory_sampler_cb([this](uint64_t ts, v8::HeapStatistics &stats) {
-          if ((heap_write_index >= heap_stats_ts.capacity()) ||
-              heap_write_index >= heap_stats_usage.capacity()) {
+          if (heap_write_index >= kMaxMeasurementSamples) {
             return true;
           }
 
-          heap_stats_ts.insert(heap_stats_ts.begin() + heap_write_index,
-                               ts - started_at);
-          heap_stats_usage.insert(
-              heap_stats_usage.begin() + heap_write_index,
+          heap_stats_ts.push_back(ts - started_at);
+          heap_stats_usage.push_back(
               static_cast<uint64_t>(stats.used_heap_size()));
           ++heap_write_index;
 
@@ -290,23 +287,20 @@ public:
         }),
 
         cpu_sampler_cb([this](uint64_t ts, double rate) {
-          if (cpu_write_index >= cpu_stats_ts.capacity() ||
-              cpu_write_index >= cpu_stats_usage.capacity()) {
+          if (cpu_write_index >= kMaxMeasurementSamples) {
             return true;
           }
-          cpu_stats_ts.insert(cpu_stats_ts.begin() + cpu_write_index,
-                              ts - started_at);
-          cpu_stats_usage.insert(cpu_stats_usage.begin() + cpu_write_index,
-                                 rate);
+          cpu_stats_ts.push_back(ts - started_at);
+          cpu_stats_usage.push_back(rate);
           ++cpu_write_index;
           return false;
         }),
 
         status(ProfileStatus::kNotStarted), id(id) {
-    heap_stats_ts.reserve(300);
-    heap_stats_usage.reserve(300);
-    cpu_stats_ts.reserve(300);
-    cpu_stats_usage.reserve(300);
+    heap_stats_ts.reserve(kMaxMeasurementSamples);
+    heap_stats_usage.reserve(kMaxMeasurementSamples);
+    cpu_stats_ts.reserve(kMaxMeasurementSamples);
+    cpu_stats_usage.reserve(kMaxMeasurementSamples);
   }
 
   const std::vector<uint64_t> &heap_usage_timestamps() const;
@@ -483,7 +477,7 @@ static napi_value GetFrameModuleWrapped(napi_env env, napi_callback_info info) {
 }
 
 napi_value
-CreateFrameNode(const napi_env &env, const v8::CpuProfileNode &node,
+CreateFrameNode(napi_env env, const v8::CpuProfileNode &node,
                 std::unordered_map<std::string, std::string> &module_cache,
                 napi_value &resources) {
   napi_value js_node;
@@ -550,7 +544,7 @@ CreateFrameNode(const napi_env &env, const v8::CpuProfileNode &node,
   return js_node;
 };
 
-napi_value CreateSample(const napi_env &env, const enum ProfileFormat format,
+napi_value CreateSample(napi_env env, const enum ProfileFormat format,
                         const uint32_t stack_id,
                         const int64_t sample_timestamp_ns,
                         const double chunk_timestamp,
@@ -599,7 +593,7 @@ std::string hashCpuProfilerNodeByPath(const v8::CpuProfileNode *node,
   return path;
 }
 
-static void GetSamples(const napi_env &env, const v8::CpuProfile *profile,
+static void GetSamples(napi_env env, const v8::CpuProfile *profile,
                        ProfileFormat format,
                        const uint64_t profile_start_timestamp_ms,
                        const uint32_t thread_id, napi_value &samples,
@@ -716,7 +710,7 @@ static void GetSamples(const napi_env &env, const v8::CpuProfile *profile,
 }
 
 static napi_value TranslateMeasurementsDouble(
-    const napi_env &env, const enum ProfileFormat format, const char *unit,
+    napi_env env, const enum ProfileFormat format, const char *unit,
     const uint64_t profile_start_timestamp_ms, const uint16_t size,
     const std::vector<double> &values,
     const std::vector<uint64_t> &timestamps_ns) {
@@ -779,7 +773,7 @@ static napi_value TranslateMeasurementsDouble(
 }
 
 static napi_value
-TranslateMeasurements(const napi_env &env, const enum ProfileFormat format,
+TranslateMeasurements(napi_env env, const enum ProfileFormat format,
                       const char *unit,
                       const uint64_t profile_start_timestamp_ms,
                       const uint16_t size, const std::vector<uint64_t> &values,
@@ -839,8 +833,7 @@ TranslateMeasurements(const napi_env &env, const enum ProfileFormat format,
   return measurement;
 }
 
-static napi_value TranslateProfile(const napi_env &env,
-                                   const v8::CpuProfile *profile,
+static napi_value TranslateProfile(napi_env env, const v8::CpuProfile *profile,
                                    const enum ProfileFormat format,
                                    const uint64_t profile_start_timestamp_ms,
                                    const uint32_t thread_id,
